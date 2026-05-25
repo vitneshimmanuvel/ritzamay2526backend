@@ -29,14 +29,19 @@ app.use('/api/chat', chatRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/admin', adminRoutes);
 
+app.get('/', (req, res) => {
+  res.json({ message: 'Welcome to Ritza B2C Consulting API! 🌟' });
+});
+
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok' });
+  res.json({ status: 'ok', environment: process.env.VERCEL ? 'vercel' : 'local' });
 });
 
 const PORT = process.env.PORT || 5000;
 
 // Export for Vercel serverless environment
 export default app;
+module.exports = app;
 
 // Only listen if not running in a serverless environment (like Vercel)
 if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
