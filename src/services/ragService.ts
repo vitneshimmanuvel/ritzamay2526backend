@@ -1,5 +1,4 @@
 import fs from 'fs';
-import pdf from 'pdf-parse';
 import mammoth from 'mammoth';
 import { QdrantClient } from '@qdrant/js-client-rest';
 import prisma from '../lib/db';
@@ -90,7 +89,7 @@ export const parseFileToText = async (filePath: string, originalName: string): P
   const fileExtension = originalName.split('.').pop()?.toLowerCase();
 
   if (fileExtension === 'pdf') {
-    // @ts-ignore
+    const pdf = require('pdf-parse');
     const data = await pdf(buffer);
     return data.text;
   } else if (fileExtension === 'docx') {
