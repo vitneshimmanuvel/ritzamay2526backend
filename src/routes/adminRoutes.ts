@@ -8,10 +8,17 @@ import { ingestDocument } from '../services/ragService';
 
 const router = Router();
 
-// Configure Multer for local uploads
-const uploadDir = path.join(__dirname, '../../uploads');
+// Configure Multer for local uploads (use /tmp for writable serverless filesystem on Vercel)
+const uploadDir = process.env.VERCEL 
+  ? '/tmp/uploads' 
+  : path.join(__dirname, '../../uploads');
+
 if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
+  try {
+    fs.mkdirSync(uploadDir, { recursive: true });
+  } catch (err) {
+    console.error("Warning: Failed to create upload directory:", err);
+  }
 }
 
 const storage = multer.diskStorage({
