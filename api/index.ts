@@ -1,3 +1,22 @@
+// Polyfill browser-only globals for pdf-parse inside Node/Vercel serverless environment
+if (typeof global !== 'undefined') {
+  if (!(global as any).DOMMatrix) {
+    (global as any).DOMMatrix = class DOMMatrix {
+      constructor() {}
+    };
+  }
+  if (!(global as any).ImageData) {
+    (global as any).ImageData = class ImageData {
+      constructor() {}
+    };
+  }
+  if (!(global as any).Path2D) {
+    (global as any).Path2D = class Path2D {
+      constructor() {}
+    };
+  }
+}
+
 import app from '../src/server';
 
 export default app;
