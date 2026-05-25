@@ -1,0 +1,94 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id            String          @id @default(uuid())
+  name          String
+  email         String          @unique
+  password      String
+  role          String          @default("user") // admin, user
+  department    String?
+  phoneNumber   String?
+  createdAt     DateTime        @default(now())
+  
+  sessions      ChatSession[]
+  messages      ChatMessage[]
+  memory        UserMemory?
+  analytics     SearchAnalytics[]
+}
+
+model ChatSession {
+  id          String         @id @default(uuid())
+  userId      String
+  user        User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  startedAt   DateTime       @default(now())
+  endedAt     DateTime?
+  summary     String?        // AI generated summary of the session
+  
+  messages    ChatMessage[]
+}
+
+model ChatMessage {
+  id             String       @id @default(uuid())
+  sessionId      String
+  session        ChatSession  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  userId         String
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role           String       // "user" or "assistant"
+  content        String
+  optionClicked  String?      // If user clicked an option to trigger this message
+  createdAt      DateTime     @default(now())
+}
+
+model UserMemory {
+  id               String   @id @default(uuid())
+  userId           String   @unique
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  lastTopic        String?
+  preferredDept    String?
+  summary          String?
+  optionsHistory   Json?    // Stores history of clicked options as JSON array
+  updatedAt        DateTime @updatedAt
+}
+
+model RagDocument {
+  id          String   @id @default(uuid())
+  filename    String
+  category    String   // HR, Finance, IT, etc.
+  chunkCount  Int      @default(0)
+  uploadedBy  String   // User ID or name
+  status      String   @default("processing") // processing, ready, failed
+  createdAt   DateTime @default(now())
+  
+  chunks      DocumentChunk[]
+}
+
+model DocumentChunk {
+  id          String      @id @default(uuid())
+  documentId  String
+  document    RagDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  content     String
+  createdAt   DateTime    @default(now())
+}
+
+model SearchAnalytics {
+  id              String   @id @default(uuid())
+  userId          String?  // nullable for anonymous/deleted users
+  user            User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  query           String
+  categoryMatched String?
+  optionClicked   String?
+  timestamp       DateTime @default(now())
+}
+
+model SavedStageOptions {
+  id        String   @id @default(uuid())
+  query     String   @unique
+  options   Json     // [{ emoji: string, text: string }, ...]
+  createdAt DateTime @default(now())
+}
