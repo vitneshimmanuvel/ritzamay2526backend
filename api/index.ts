@@ -17,7 +17,8 @@ if (typeof global !== 'undefined') {
   }
 }
 
-import app from '../src/server';
+// Load the Express app sequentially to prevent ESModule import hoisting
+const app = require('../src/server').default || require('../src/server');
 
 export default app;
 module.exports = app;
