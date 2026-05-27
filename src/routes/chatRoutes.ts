@@ -110,7 +110,35 @@ router.post('/options', async (req: any, res: Response) => {
     }
 
     const options = await generateOptions(query);
-    res.json({ options, sessionId: activeSessionId });
+    let answer = null;
+
+    if (options.length === 0) {
+      // Off-topic / greeting query: Bypasses cards entirely and returns warm text reply!
+      const { generateChitChatAnswer } = require('../services/aiService');
+      answer = await generateChitChatAnswer(query);
+    } else {
+      // Travel-related query. Check if there's a highly similar past question answered
+      const { findSimilarPastAnswer, generateInitialAnswer } = require('../services/aiService');
+      answer = await findSimilarPastAnswer(query);
+      
+      if (!answer) {
+        answer = await generateInitialAnswer(query);
+      }
+    }
+
+    if (answer && user && activeSessionId) {
+      // Save assistant answer in the database if there is one
+      await prisma.chatMessage.create({
+        data: {
+          sessionId: activeSessionId,
+          userId: user.id,
+          role: 'assistant',
+          content: answer,
+        },
+      });
+    }
+
+    res.json({ options, answer, sessionId: activeSessionId });
   } catch (error: any) {
     console.error("Error in /options:", error.message);
     res.status(500).json({ error: 'Failed to generate options' });

@@ -36,7 +36,29 @@ export const generateResponse = async (prompt: string): Promise<string> => {
   return await callOllama(prompt);
 };
 import prisma from '../lib/db';
-import { searchKnowledgeBase } from './ragService';
+import { searchKnowledgeBase, correctQueryTypos } from './ragService';
+
+// Levenshtein distance helper for typo tolerance
+const levenshteinDistance = (a: string, b: string): number => {
+  const tmp = [];
+  let i, j;
+  for (i = 0; i <= a.length; i++) {
+    tmp[i] = [i];
+  }
+  for (j = 0; j <= b.length; j++) {
+    tmp[0][j] = j;
+  }
+  for (i = 1; i <= a.length; i++) {
+    for (j = 1; j <= b.length; j++) {
+      tmp[i][j] = Math.min(
+        tmp[i - 1][j] + 1, // deletion
+        tmp[i][j - 1] + 1, // insertion
+        tmp[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1) // substitution
+      );
+    }
+  }
+  return tmp[a.length][b.length];
+};
 
 // Helper to calculate similarity between two strings (Jaccard similarity of words)
 const calculateSimilarity = (str1: string, str2: string): number => {
@@ -59,8 +81,182 @@ const calculateSimilarity = (str1: string, str2: string): number => {
   return intersection / union;
 };
 
+const isTravelRelated = (query: string): boolean => {
+  const cleanQuery = query.toLowerCase().trim();
+  const correctedQuery = correctQueryTypos(cleanQuery);
+  const travelKeywords = [
+    // Core verbs/nouns and common typos
+    'study', 'stduy', 'studing', 'studdy', 'studt', 'stundy', 'learn', 'education',
+    'work', 'wrk', 'working', 'job', 'permit', 'sponsor', 'employ', 'career', 'salary',
+    'visa', 'visas', 'pr', 'permanent residenc', 'express entry', 'crs', 'immigration', 'immigrate', 'counsel', 'consult',
+    'travel', 'visit', 'tourist', 'tourism', 'schengen', 'passport', 'ticket', 'itinerary',
+    'abroad', 'abrad', 'abrod', 'abard', 'overseas', 'foreign', 'destination', 'flight', 'eligibility',
+    
+    // Academic fields and majors and typos
+    'science', 'scece', 'computer', 'engineering', 'tech', 'coding', 'business', 'mba', 'finance', 'arts',
+    
+    // Levels/Degrees
+    'college', 'colg', 'university', 'univ', 'dli', 'loa', 'tuition', 'fee', 'fees',
+    'pg', 'ug', 'master', 'bachelor', 'degree', 'course', 'fresher',
+    
+    // Target countries and common typos
+    'canada', 'usa', 'america', 'uk', 'london', 'australia', 'sydney', 'melbourne', 'europe', 'germany', 'france',
+    'country', 'countries', 'contry', 'contries',
+    
+    // Profile indicators
+    'ielts', 'toefl', 'gre', 'gmat', 'assessment', 'profile', 'consultant', 'advisor', 'counselor'
+  ];
+  
+  // 1. Direct match on either original or corrected query
+  if (travelKeywords.some(keyword => cleanQuery.includes(keyword) || correctedQuery.includes(keyword))) {
+    return true;
+  }
+
+  // 2. Fuzzy match on individual words from cleanQuery and correctedQuery
+  const cleanWords = cleanQuery.replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(w => w.length >= 3);
+  const correctedWords = correctedQuery.replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(w => w.length >= 3);
+  const allWords = Array.from(new Set([...cleanWords, ...correctedWords]));
+
+  for (const word of allWords) {
+    for (const keyword of travelKeywords) {
+      if (word.includes(keyword) || keyword.includes(word)) {
+        return true;
+      }
+      
+      const dist = levenshteinDistance(word, keyword);
+      const maxAllowedDist = keyword.length <= 5 ? 1 : 2;
+      if (dist <= maxAllowedDist) {
+        console.log(`[Typo-Tolerance] Fuzzy matched query word "${word}" to travel keyword "${keyword}" (distance: ${dist})`);
+        return true;
+      }
+    }
+  }
+
+  return false;
+};
+
+const isGreeting = (query: string): boolean => {
+  const cleanQuery = query.toLowerCase().trim();
+  const initialTriggers = ["hi", "hello", "hey", "start", "start chat", "options", "good morning", "good afternoon", "good evening"];
+  return initialTriggers.some(t => cleanQuery === t || cleanQuery.startsWith("hi ") || cleanQuery.startsWith("hello "));
+};
+
+export const generateChitChatAnswer = async (query: string): Promise<string> => {
+  const cleanQuery = query.toLowerCase().trim();
+  
+  // Specific handler for profile / who are you questions
+  if (cleanQuery.includes("who are you") || cleanQuery.includes("your name") || cleanQuery.includes("what is your name")) {
+    return "I am Ritza, your friendly advisor and counselor for studying abroad! Or do you want a personal guide for your future? I'm right here to guide you step-by-step! 🌟";
+  }
+
+  // Specific handler for greetings
+  const greetingTriggers = ["hi", "hello", "hey", "good morning", "good afternoon", "good evening"];
+  if (greetingTriggers.some(t => cleanQuery === t || cleanQuery.startsWith("hi ") || cleanQuery.startsWith("hello "))) {
+    return "Hey buddy! I'm Ritza, your friendly study abroad advisor and counselor for your future! 🌟 Ask me any question about target countries, colleges, work permits, or visas, and let's get you set up for success! What are you dreaming of exploring today? 😊";
+  }
+
+  const prompt = `You are Ritza, an extremely warm, friendly, and helpful B2C study-abroad counselor and personal companion. You speak in a very warm, supportive, buddy-like tone. Use emojis!
+  
+  CRITICAL PERSONA CONSTRAINT: You must ONLY introduce yourself or say your name ('Ritza') if the user explicitly asks who you are or what your name is. In all other messages, DO NOT say 'I'm Ritza' or introduce yourself at all. Speak naturally and go straight to answering their query like in a real, continuous person-to-person conversation!
+  
+  CRITICAL COUNSELING BOUNDARY RULE: If the user asks you factual, direct, or academic questions about a specific scientific, technical, academic, or general subject (such as space science, astrophysics, coding, physics, history, cooking, etc.), you must NOT explain or answer that scientific/academic subject directly. Instead, warmly and politely state that unfortunately you don't know that specific subject itself, but you can absolutely help them explore where to study/learn that subject abroad, evaluate top international universities, or plan their future career/study visa options in that field!
+  Example response style: "Unfortunately, I don't know much about Space Science itself, but I'd be absolutely thrilled to help you explore where to study Space Science abroad, find top universities, or plan your future career in that exciting field! 🚀🌌"
+  
+  Reply to the user's random query or chit-chat in a very friendly, natural, and helpful way. Keep your response short (1 to 3 sentences maximum) and end with a nice friendly invitation to talk about their future travel or study abroad plans.
+  
+  User query: "${query}"`;
+  
+  return await generateResponse(prompt);
+};
+
+export const generateInitialAnswer = async (query: string): Promise<string> => {
+  const cleanQuery = query.toLowerCase().trim();
+
+  // Specific handler for profile / who are you questions
+  if (cleanQuery.includes("who are you") || cleanQuery.includes("your name") || cleanQuery.includes("what is your name")) {
+    return "I am Ritza, your friendly advisor and counselor for studying abroad! Or do you want a personal guide for your future? I'm right here to guide you step-by-step! 🌟";
+  }
+
+  // Specific handler for greetings
+  const greetingTriggers = ["hi", "hello", "hey", "good morning", "good afternoon", "good evening"];
+  if (greetingTriggers.some(t => cleanQuery === t || cleanQuery.startsWith("hi ") || cleanQuery.startsWith("hello "))) {
+    return "Hey buddy! I'm Ritza, your friendly study abroad advisor and counselor for your future! 🌟 Ask me any question about target countries, colleges, work permits, or visas, and let's get you set up for success! What are you dreaming of exploring today? 😊";
+  }
+
+  const prompt = `You are Ritza, an extremely warm, supportive, B2C study-abroad counselor buddy. You speak in a very brief, conversational, approachable tone. Use emojis!
+  
+  CRITICAL PERSONA CONSTRAINT: You must NEVER introduce yourself or say your name ('Ritza') in this reply.
+
+  STRICT B2C STUDY ABROAD FOCUS: You are strictly a study-abroad, international college admission, and academic career visa counselor. You are NOT a tourism agent, holiday planner, or family vacation organizer. Even if the query mentions 'family', 'traveling', or 'visiting', you must NEVER suggest holiday vacation plans, family trips, or leisure tourism. Keep your response completely focused on study abroad and career plans. Ground your thoughts directly on the RAG context if applicable.
+
+  EMPATHETIC FRESHER VALIDATION: If the user expresses confusion, struggle, or is unsure about whether to study further vs going to work (e.g. "I don't know what to do", "studying pg or working", "freshers"), you must start your response with a very warm, comforting, and empathetic validation:
+  "I completely understand your confusion and frustration as a fresher. This stage comes to so many people in their early career stages. Don't worry at all, let's figure this out step-by-step! 😊"
+
+  Briefly acknowledge their query: "${query}" in 1-2 friendly sentences, reassure them that they have amazing opportunities, and invite them to explore the option cards below! Keep the entire response short (maximum 2 to 3 sentences total).`;
+
+  return await generateResponse(prompt);
+};
+
+export const findSimilarPastAnswer = async (query: string): Promise<string | null> => {
+  try {
+    const cleanQuery = query.toLowerCase().trim();
+    // Avoid matching simple greetings
+    if (isGreeting(query) || query.length < 5) return null;
+
+    const pastUserMessages = await prisma.chatMessage.findMany({
+      where: { role: 'user' },
+      orderBy: { createdAt: 'desc' },
+      take: 100 // check last 100 queries
+    });
+
+    let bestMatch: any = null;
+    let highestSimilarity = 0;
+
+    for (const msg of pastUserMessages) {
+      // Skip if the text matches exactly the query (to avoid self-matching)
+      if (msg.content.toLowerCase().trim() === cleanQuery) continue;
+
+      const sim = calculateSimilarity(query, msg.content);
+      if (sim > highestSimilarity) {
+        highestSimilarity = sim;
+        bestMatch = msg;
+      }
+    }
+
+    if (highestSimilarity > 0.65 && bestMatch) {
+      console.log(`[RAG-Similarity] Found highly similar past user question: "${bestMatch.content}" (Similarity: ${(highestSimilarity * 100).toFixed(1)}%)`);
+      // Get the subsequent assistant message in the same session
+      const assistantMsg = await prisma.chatMessage.findFirst({
+        where: {
+          sessionId: bestMatch.sessionId,
+          createdAt: { gt: bestMatch.createdAt },
+          role: 'assistant'
+        },
+        orderBy: { createdAt: 'asc' }
+      });
+
+      if (assistantMsg && assistantMsg.content) {
+        // Prepend the friendly yes/no confirmation header
+        return `Hey buddy, are you looking for this output? If yes, perfect! If no, okay let's go with the flow! 😊\n\n${assistantMsg.content}`;
+      }
+    }
+  } catch (err) {
+    console.error("Failed to lookup similar past answer:", err);
+  }
+  return null;
+};
+
 export const generateOptions = async (query: string, isFollowUp: boolean = false) => {
   const cleanQuery = query.toLowerCase().trim();
+
+  // If this is a user-typed query (not a direct option click follow-up)
+  // and is NOT travel/immigration related, bypass option cards entirely!
+  // This prevents cards from popping up for greetings or off-topic chit-chat.
+  if (!isFollowUp && !isTravelRelated(query)) {
+    console.log(`[RAG-Persona] Off-topic/greeting query detected: "${query}". Bypassing options/cards.`);
+    return [];
+  }
+
   const initialTriggers = ["hi", "hello", "hey", "start", "start chat", "options"];
   const isInitial = !isFollowUp && (
     initialTriggers.some(t => cleanQuery === t || cleanQuery.startsWith("hi ")) || 
@@ -109,21 +305,24 @@ export const generateOptions = async (query: string, isFollowUp: boolean = false
 
   const context = await searchKnowledgeBase(query);
   
-  const prompt = `You are Ritza, a friendly B2C travel & immigration consulting assistant. You design the B2C consulting conversation to be entirely card-driven and interactive.
+  const prompt = `You are Ritza, a warm, supportive, and friendly B2C study-abroad counselor buddy. You design the B2C consulting conversation to be entirely card-driven and interactive.
 
 The user is exploring this step: "${query}".
 Here is some context from our travel/immigration database:
 "${context}"
 
-Your job is to generate exactly 5 clickable option cards that help the user select their next step, explore countries, or choose specific information details.
-Each option card text should be highly specific, engaging, and information-rich, presenting actual choices or pathways for them to click!
-For example:
-- Specific countries to explore: "Canada: Study Permit & Express Entry 🇨🇦", "USA: Ivy League & F-1 Visas 🇺🇸", "UK: Russel Group & Skilled Work 🇬🇧"
-- Budget choices: "Budget: Low Tuition Countries 📉", "Budget: High Return on Investment 💰"
-- Processing speed: "Fast Processing Pathways ⚡", "Direct PR Streams 🗺️"
-- Assessment details: "Test Requirements: IELTS & TOEFL 📝", "Work Experience Evaluation 💼"
+Your job is to generate exactly 5 clickable option cards that help the user select their next step, resolve their dilemmas, or choose specific information details.
 
-Provide options that let the user drill directly into the details by tapping the cards! Do NOT discuss B2B employee policies.
+STRICT B2C STUDY ABROAD FOCUS: You are strictly a study-abroad, international college admission, and academic career visa counselor. You are NOT a tourism agent, holiday planner, or family vacation organizer. Even if the user mentions 'family', 'traveling', or 'visiting', you must NEVER suggest holiday vacation plans, family trips, or leisure tourism. Keep the option cards completely focused on study abroad pathways, college budgets, family support for educational tuition, career opportunities, and student eligibility!
+
+CRITICAL COUNSELING PATHWAY RULE: Do NOT just output generic visa subclasses or dry database facts. If the user is struggling to choose between options (such as deciding whether to study further vs. going to work, figuring out target countries, or questioning what to do with their career/future), you MUST generate option cards that present direct, empathetic counseling choices to resolve their struggle!
+For example:
+- Budget / Family support choices: "Budget: Can my family support study tuition? 💰", "Low Cost: Countries with low/zero tuition 📈"
+- Career pathway choices: "Direct Work: Tech job sponsor pathways 💼", "Study & Work: Part-time student jobs & PGWP 🎓"
+- Practical dilemmas: "Career: Do you want coding jobs or research? 🎯", "Destination: Best countries for Computer Science graduates 🚀"
+- Evaluation: "Evaluation: Chat with Ritza to assess my profile step-by-step 🌟"
+
+Make the option card choices feel highly personal, helpful, and empathetic to a real person-to-person guidance chat! Do NOT discuss B2B employee policies.
 
 Assign a highly relevant single emoji to each option card.
 Format the output strictly as a JSON array of objects, like this: [{"emoji": "📚", "text": "Option card 1"}, {"emoji": "💼", "text": "Option card 2"}]. Do not output any markdown formatting, just the raw JSON array.`;
@@ -169,7 +368,13 @@ Format the output strictly as a JSON array of objects, like this: [{"emoji": "�
 export const generateAnswer = async (query: string, selectedOption: string) => {
   const context = await searchKnowledgeBase(selectedOption);
 
-  const prompt = `You are Ritza, a warm, friendly, and expert B2C travel & immigration consultant girl. You speak in an extremely brief, conversational, approachable tone. You assist individual B2C clients, not B2B employees.
+  const prompt = `You are Ritza, an extremely warm, friendly, and supportive B2C study-abroad counselor buddy. You speak in a very natural, brief, conversational, and approachable "buddy" style. You are helping them as a personal guide for their future.
+
+CRITICAL PERSONA CONSTRAINT: You must NEVER introduce yourself or say your name ('Ritza') in this reply. In all chat responses, speak naturally, go straight to commenting on their choice, and do not repeat 'I'm Ritza' or introduce yourself. Speak like in a real, continuous person-to-person conversation.
+
+STRICT B2C STUDY ABROAD FOCUS: You are strictly a study-abroad, international college admission, and academic career visa counselor. You are NOT a tourism agent, holiday planner, or family vacation organizer. Even if the user mentions 'family', 'traveling', or 'visiting', you must NEVER suggest holiday vacation plans, family trips, or leisure tourism. Keep your advice completely focused on study abroad options, college budgets, family support for educational tuition, and student career pathways! Ground all advice directly in the RAG database context provided below.
+
+EMPATHETIC FRESHER VALIDATION: If the user originally asked a query or expressed confusion/struggle (such as deciding whether to study further vs. going to work, or being unsure of what to do with their career/future), you must start your response with a very warm, comforting, and empathetic validation. Reassure them with phrases like: "I completely understand your confusion/frustration as a fresher. This stage comes to so many people in their early career stages. Don't worry at all, let's figure this out step-by-step! 😊".
 
 CRITICAL CONSTRAINT: You must NEVER output long lists of information, raw tables, or detailed country breakdowns directly in your text response. Keep your reply extremely short (maximum 1 to 2 sentences) and friendly — act purely as a guide. Do not list details like budgets, flight costs, or requirements in this text. Instead, just give a warm 1-sentence consulting acknowledgement of their choice: "${selectedOption}" and briefly ask them to choose the next card!
 

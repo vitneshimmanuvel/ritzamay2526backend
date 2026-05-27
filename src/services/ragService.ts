@@ -179,6 +179,37 @@ export const ingestDocument = async (
   }
 };
 
+// Helper to correct common typos in search queries
+export const correctQueryTypos = (query: string): string => {
+  let corrected = query.toLowerCase();
+  
+  const typoMap: { [key: string]: string } = {
+    'stundy': 'study',
+    'stduy': 'study',
+    'studing': 'studying',
+    'studdty': 'study',
+    'studdy': 'study',
+    'studt': 'study',
+    'abard': 'abroad',
+    'abrad': 'abroad',
+    'abrod': 'abroad',
+    'contry': 'country',
+    'contries': 'countries',
+    'scece': 'science',
+    'scence': 'science',
+    'colg': 'college',
+    'univ': 'university',
+    'wrk': 'work'
+  };
+
+  Object.entries(typoMap).forEach(([typo, correction]) => {
+    const regex = new RegExp(`\\b${typo}\\b`, 'gi');
+    corrected = corrected.replace(regex, correction);
+  });
+
+  return corrected;
+};
+
 // Search RAG knowledge base
 export const searchKnowledgeBase = async (query: string, k: number = 4): Promise<string> => {
   // Try retrieving database chunks first
@@ -191,11 +222,12 @@ export const searchKnowledgeBase = async (query: string, k: number = 4): Promise
     return defaultOverseasData.slice(0, k).join("\n\n");
   }
 
-  // Basic keyword relevance matching
-  const queryWords = query.toLowerCase().split(/\s+/).filter(w => w.length > 3);
+  // Correct common typos before building search query words
+  const correctedQuery = correctQueryTypos(query);
+  const queryWords = correctedQuery.split(/\s+/).filter(w => w.length > 3);
   
   if (queryWords.length === 0) {
-    return dbChunks.slice(0, k).map(c => `[Category: ${c.document.category}] ${c.content}`).join("\n\n");
+    return defaultOverseasData.slice(0, k).join("\n\n");
   }
 
   const scoredChunks = dbChunks.map(chunk => {
@@ -216,13 +248,141 @@ export const searchKnowledgeBase = async (query: string, k: number = 4): Promise
   // Sort by score desc
   scoredChunks.sort((a, b) => b.score - a.score);
 
-  // If no matching words, return the top recent chunks
+  // If no matching words, return the default overseas data instead of random recent chunks
   if (scoredChunks[0].score === 0) {
-    return dbChunks.slice(0, k).map(c => `[Category: ${c.document.category}] ${c.content}`).join("\n\n");
+    return defaultOverseasData.slice(0, k).join("\n\n");
   }
 
   return scoredChunks
     .slice(0, k)
     .map(r => `[Category: ${r.chunk.document.category}] ${r.chunk.content}`)
     .join("\n\n");
+};
+
+// Helper to clean HTML text
+const cleanHtml = (html: string): string => {
+  // 1. Remove script tags and their content
+  let text = html.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, ' ');
+  // 2. Remove style tags and their content
+  text = text.replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, ' ');
+  // 3. Remove head tags and their content
+  text = text.replace(/<head\b[^<]*(?:(?!<\/head>)<[^<]*)*<\/head>/gi, ' ');
+  // 4. Remove all other HTML tags
+  text = text.replace(/<[^>]*>/g, ' ');
+  // 5. Replace common HTML entities
+  text = text
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&amp;/gi, '&')
+    .replace(/&quot;/gi, '"')
+    .replace(/&apos;/gi, "'")
+    .replace(/&#39;/gi, "'");
+  // 6. Clean up excessive whitespaces
+  text = text.replace(/\s+/g, ' ').trim();
+  return text;
+};
+
+// Ingest a website
+export const ingestWebsite = async (
+  url: string,
+  category: string,
+  uploadedBy: string
+) => {
+  // 1. Check if the document already exists (so we can reload/overwrite)
+  const existingDoc = await prisma.ragDocument.findFirst({
+    where: { filename: `Website: ${url}` },
+  });
+
+  let doc;
+  if (existingDoc) {
+    // If it exists, clear its old chunks and set it to processing
+    await prisma.documentChunk.deleteMany({
+      where: { documentId: existingDoc.id }
+    });
+    doc = await prisma.ragDocument.update({
+      where: { id: existingDoc.id },
+      data: {
+        category,
+        uploadedBy,
+        status: 'processing',
+        chunkCount: 0,
+      }
+    });
+  } else {
+    // Otherwise, create a new document record
+    doc = await prisma.ragDocument.create({
+      data: {
+        filename: `Website: ${url}`,
+        category,
+        uploadedBy,
+        status: 'processing',
+      },
+    });
+  }
+
+  try {
+    // 2. Fetch the website HTML
+    const response = await globalThis.fetch(url);
+    if (!response.ok) {
+      throw new Error(`Failed to fetch website HTML: ${response.statusText}`);
+    }
+    const html = await response.text();
+
+    // 3. Clean the HTML and chunk it
+    const cleanText = cleanHtml(html);
+    const chunks = chunkText(cleanText);
+
+    // 4. Save chunks to Database
+    await prisma.documentChunk.createMany({
+      data: chunks.map(chunk => ({
+        documentId: doc.id,
+        content: chunk,
+      })),
+    });
+
+    // 5. Update status and chunk count
+    await prisma.ragDocument.update({
+      where: { id: doc.id },
+      data: {
+        chunkCount: chunks.length,
+        status: 'ready',
+      },
+    });
+
+    // 6. Try indexing to Qdrant if healthy
+    if (await isQdrantHealthy() && qdrantClient) {
+      try {
+        const points = chunks.map((chunk, idx) => {
+          const dummyVector = Array.from({ length: 384 }, () => Math.random());
+          return {
+            id: `${doc.id}-${idx}`,
+            vector: dummyVector,
+            payload: {
+              documentId: doc.id,
+              filename: `Website: ${url}`,
+              category,
+              content: chunk,
+            },
+          };
+        });
+
+        await qdrantClient.upsert("enterprise_knowledge", {
+          wait: true,
+          points
+        });
+      } catch (err) {
+        console.error("Failed to index website chunks in Qdrant:", err);
+      }
+    }
+
+    return doc;
+  } catch (error) {
+    console.error(`Failed to ingest website ${url}:`, error);
+    await prisma.ragDocument.update({
+      where: { id: doc.id },
+      data: { status: 'failed' },
+    });
+    throw error;
+  }
 };

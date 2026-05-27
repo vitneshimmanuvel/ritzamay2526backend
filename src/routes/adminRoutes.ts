@@ -4,7 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import prisma from '../lib/db';
 import { authenticateJWT, requireAdmin, AuthenticatedRequest } from '../middlewares/authMiddleware';
-import { ingestDocument } from '../services/ragService';
+import { ingestDocument, ingestWebsite } from '../services/ragService';
 
 const router = Router();
 
@@ -128,6 +128,34 @@ router.post(
     } catch (error: any) {
       console.error('Upload document error:', error);
       res.status(500).json({ error: 'Failed to upload and process document' });
+    }
+  }
+);
+
+// Admin: Ingest a website
+router.post(
+  '/documents/ingest-website',
+  authenticateJWT,
+  requireAdmin,
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const { url, category } = req.body;
+      if (!url || !category) {
+        return res.status(400).json({ error: 'URL and Category are required' });
+      }
+
+      const uploaderName = req.user?.name || 'Admin';
+
+      // Start ingestion
+      const doc = await ingestWebsite(url, category, uploaderName);
+
+      res.status(201).json({
+        message: 'Website ingestion process started successfully.',
+        document: doc,
+      });
+    } catch (error: any) {
+      console.error('Ingest website error:', error);
+      res.status(500).json({ error: error.message || 'Failed to ingest website' });
     }
   }
 );
