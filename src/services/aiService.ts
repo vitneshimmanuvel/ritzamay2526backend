@@ -386,3 +386,5 @@ Here is the context from our database:
 
   return await generateResponse(prompt);
 };
+
+// End of Ritza AI Service. Trigger redeploy.
